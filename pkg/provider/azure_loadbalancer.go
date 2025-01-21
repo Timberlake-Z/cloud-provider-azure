@@ -3874,6 +3874,9 @@ func (az *Cloud) ensureLoadBalancerTagged(lb *armnetwork.LoadBalancer) bool {
 	if az.Tags == "" && len(az.TagsMap) == 0 {
 		return false
 	}
+	klog.Infof("Tim, start func ensureLoadBalancerTagged-----------")
+	klog.Infof("Tim, az.Tags: %s", az.Tags)
+	klog.Infof("Tim, az.TagsMap: %v", az.TagsMap)
 	tags := parseTags(az.Tags, az.TagsMap)
 	if lb.Tags == nil {
 		lb.Tags = make(map[string]*string)
@@ -3881,6 +3884,8 @@ func (az *Cloud) ensureLoadBalancerTagged(lb *armnetwork.LoadBalancer) bool {
 
 	tags, changed := az.reconcileTags(lb.Tags, tags)
 	lb.Tags = tags
+	klog.Infof("Tim, lb.Tags: %v", lb.Tags)
+	klog.Infof("Tim, end func ensureLoadBalancerTagged------------")
 
 	return changed
 }

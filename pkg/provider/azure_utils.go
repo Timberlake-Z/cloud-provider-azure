@@ -71,7 +71,11 @@ func parseTags(tags string, tagsMap map[string]string) map[string]*string {
 				klog.Warningf("parseTags: error when parsing key-value pair %s, would ignore this one", kv)
 				continue
 			}
+			// Avoid "Null" string after TrimSpace, cause ARM error
 			k, v := strings.TrimSpace(res[0]), strings.TrimSpace(res[1])
+			if strings.EqualFold(v, "null") {
+				v = res[1]
+			}
 			if k == "" {
 				klog.Warning("parseTags: empty key, ignoring this key-value pair")
 				continue
@@ -81,8 +85,11 @@ func parseTags(tags string, tagsMap map[string]string) map[string]*string {
 	}
 
 	if len(tagsMap) > 0 {
-		for key, value := range tagsMap {
-			key, value := strings.TrimSpace(key), strings.TrimSpace(value)
+		for k, v := range tagsMap {
+			key, value := strings.TrimSpace(k), strings.TrimSpace(v)
+			if strings.EqualFold(value, "null") {
+				value = v
+			}
 			if key == "" {
 				klog.Warningf("parseTags: empty key, ignoring this key-value pair")
 				continue
@@ -113,6 +120,11 @@ func (az *Cloud) reconcileTags(currentTagsOnResource, newTags map[string]*string
 	var systemTags []string
 	systemTagsMap := make(map[string]*string)
 
+	klog.Infof("Tim, start reconcileTags")
+	klog.Infof("Tim, currentTagsOnResource: %v", currentTagsOnResource)
+	klog.Infof("Tim, newTags: %v", newTags)
+	klog.Infof("Tim, az.SystemTags: %v", az.SystemTags)
+
 	if az.SystemTags != "" {
 		systemTags = strings.Split(az.SystemTags, consts.TagsDelimiter)
 		for i := 0; i < len(systemTags); i++ {
@@ -123,11 +135,13 @@ func (az *Cloud) reconcileTags(currentTagsOnResource, newTags map[string]*string
 			systemTagsMap[systemTag] = ptr.To("")
 		}
 	}
+	klog.Infof("Tim, systemTagsMap after read from SystemTag: %v", systemTagsMap)
 
 	// if the systemTags is not set, just add/update new currentTagsOnResource and not delete old currentTagsOnResource
 	for k, v := range newTags {
 		found, key := findKeyInMapCaseInsensitive(currentTagsOnResource, k)
-
+		klog.Infof("Tim, into systemtag not set logic")
+		klog.Infof("Tim, found: %v, key: %v", found, key)
 		if !found {
 			currentTagsOnResource[k] = v
 			changed = true
@@ -139,10 +153,12 @@ func (az *Cloud) reconcileTags(currentTagsOnResource, newTags map[string]*string
 
 	// if the systemTags is set, delete the old currentTagsOnResource
 	if len(systemTagsMap) > 0 {
+		klog.Infof("Tim, into systemtag set logic")
 		for k := range currentTagsOnResource {
 			if _, ok := newTags[k]; !ok {
 				if found, _ := findKeyInMapCaseInsensitive(systemTagsMap, k); !found {
 					klog.V(2).Infof("reconcileTags: delete tag %s: %s", k, ptr.Deref(currentTagsOnResource[k], ""))
+					klog.Infof("Tim, delete tag %s: %s", k, ptr.Deref(currentTagsOnResource[k], ""))
 					delete(currentTagsOnResource, k)
 					changed = true
 				}
