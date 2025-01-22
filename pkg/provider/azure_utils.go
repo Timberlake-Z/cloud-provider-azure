@@ -116,13 +116,29 @@ func findKeyInMapCaseInsensitive(targetMap map[string]*string, key string) (bool
 	return false, ""
 }
 
+// build for easy access the value into log
+func formatMap(m map[string]*string) string {
+	var result string
+	for k, v := range m {
+		if v == nil {
+			result += fmt.Sprintf("%s: <nil>, ", k)
+		} else {
+			result += fmt.Sprintf("%s: %s, ", k, *v)
+		}
+	}
+	if len(result) > 0 {
+		result = result[:len(result)-2]
+	}
+	return "{" + result + "}"
+}
+
 func (az *Cloud) reconcileTags(currentTagsOnResource, newTags map[string]*string) (reconciledTags map[string]*string, changed bool) {
 	var systemTags []string
 	systemTagsMap := make(map[string]*string)
 
 	klog.Infof("Tim, start reconcileTags")
-	klog.Infof("Tim, currentTagsOnResource: %v", currentTagsOnResource)
-	klog.Infof("Tim, newTags: %v", newTags)
+	klog.Infof("Tim, currentTagsOnResource: %s", formatMap(currentTagsOnResource))
+	klog.Infof("Tim, newTags: %s", formatMap(newTags))
 	klog.Infof("Tim, az.SystemTags: %v", az.SystemTags)
 
 	if az.SystemTags != "" {
