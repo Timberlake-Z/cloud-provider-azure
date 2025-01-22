@@ -3208,12 +3208,15 @@ func shouldReleaseExistingOwnedPublicIP(
 
 // ensurePIPTagged ensures the public IP of the service is tagged as configured
 func (az *Cloud) ensurePIPTagged(service *v1.Service, pip *armnetwork.PublicIPAddress) bool {
+	klog.Infof("Timb, into ensurePIPTagged----------------------------")
 	configTags := parseTags(az.Tags, az.TagsMap)
 	annotationTags := make(map[string]*string)
 	if _, ok := service.Annotations[consts.ServiceAnnotationAzurePIPTags]; ok {
 		annotationTags = parseTags(service.Annotations[consts.ServiceAnnotationAzurePIPTags], map[string]string{})
 	}
-
+	klog.Infof("Timb, annotationTags: %s", formatMap(annotationTags))
+	klog.Infof("Timb, configTags, result of parse aztag and map: %s", formatMap(configTags))
+	klog.Infof("Timb, pipTags: %s", formatMap(pip.Tags))
 	for k, v := range annotationTags {
 		found, key := findKeyInMapCaseInsensitive(configTags, k)
 		if !found {
@@ -3243,9 +3246,12 @@ func (az *Cloud) ensurePIPTagged(service *v1.Service, pip *armnetwork.PublicIPAd
 	if serviceNameUsingDNS != nil {
 		configTags[consts.ServiceUsingDNSKey] = serviceNameUsingDNS
 	}
+	klog.Infof("Timb, before pip reconcile, annotationtag: %s", formatMap(annotationTags))
+	klog.Infof("Timb, before pip reconcile, piptag: %s", formatMap(pip.Tags))
 
 	tags, changed := az.reconcileTags(pip.Tags, configTags)
 	pip.Tags = tags
+	klog.Infof("Timb, after pip reconcile, piptag------------------: %s", formatMap(pip.Tags))
 
 	return changed
 }
@@ -3874,9 +3880,10 @@ func (az *Cloud) ensureLoadBalancerTagged(lb *armnetwork.LoadBalancer) bool {
 	if az.Tags == "" && len(az.TagsMap) == 0 {
 		return false
 	}
-	klog.Infof("Tim, start func ensureLoadBalancerTagged")
-	klog.Infof("Tim, az.Tags: %s", az.Tags)
-	klog.Infof("Tim, az.TagsMap: %v", az.TagsMap)
+	klog.Infof("Timb, start func ensureLoadBalancerTagged---------------------")
+	klog.Infof("Timb, az.Tags: %s", az.Tags)
+	klog.Infof("Timb, az.TagsMap: %v", az.TagsMap)
+	klog.Infof("Timb, lb.Tags before reconcile: %s", formatMap(lb.Tags))
 	tags := parseTags(az.Tags, az.TagsMap)
 	if lb.Tags == nil {
 		lb.Tags = make(map[string]*string)
@@ -3884,8 +3891,8 @@ func (az *Cloud) ensureLoadBalancerTagged(lb *armnetwork.LoadBalancer) bool {
 
 	tags, changed := az.reconcileTags(lb.Tags, tags)
 	lb.Tags = tags
-	klog.Infof("Tim, lb.Tags: %v", lb.Tags)
-	klog.Infof("Tim, end func ensureLoadBalancerTagged------------")
+	klog.Infof("Timb, lb.Tags after reconcile: %s", formatMap(lb.Tags))
+	klog.Infof("Timb, end func ensureLoadBalancerTagged------------------------")
 
 	return changed
 }

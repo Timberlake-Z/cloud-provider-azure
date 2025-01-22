@@ -116,7 +116,7 @@ func findKeyInMapCaseInsensitive(targetMap map[string]*string, key string) (bool
 	return false, ""
 }
 
-// build for easy access the value into log
+// Timb, build for easy access the value into log
 func formatMap(m map[string]*string) string {
 	var result string
 	for k, v := range m {
@@ -136,10 +136,10 @@ func (az *Cloud) reconcileTags(currentTagsOnResource, newTags map[string]*string
 	var systemTags []string
 	systemTagsMap := make(map[string]*string)
 
-	klog.Infof("Tim, start reconcileTags")
-	klog.Infof("Tim, currentTagsOnResource: %s", formatMap(currentTagsOnResource))
-	klog.Infof("Tim, newTags: %s", formatMap(newTags))
-	klog.Infof("Tim, az.SystemTags: %v", az.SystemTags)
+	klog.Infof("Timb, start reconcileTags")
+	klog.Infof("Timb, currentTagsOnResource: %s", formatMap(currentTagsOnResource))
+	klog.Infof("Timb, newTags: %s", formatMap(newTags))
+	klog.Infof("Timb, az.SystemTags: %v", az.SystemTags)
 
 	if az.SystemTags != "" {
 		systemTags = strings.Split(az.SystemTags, consts.TagsDelimiter)
@@ -151,13 +151,13 @@ func (az *Cloud) reconcileTags(currentTagsOnResource, newTags map[string]*string
 			systemTagsMap[systemTag] = ptr.To("")
 		}
 	}
-	klog.Infof("Tim, systemTagsMap after read from SystemTag: %v", systemTagsMap)
+	klog.Infof("Timb, systemTagsMap after read from SystemTag: %v", systemTagsMap)
 
 	// if the systemTags is not set, just add/update new currentTagsOnResource and not delete old currentTagsOnResource
 	for k, v := range newTags {
 		found, key := findKeyInMapCaseInsensitive(currentTagsOnResource, k)
-		klog.Infof("Tim, into systemtag not set logic")
-		klog.Infof("Tim, found: %v, key: %v", found, key)
+		klog.Infof("Timb, into systemtag not set logic")
+		klog.Infof("Timb, found: %v, key: %v", found, key)
 		if !found {
 			currentTagsOnResource[k] = v
 			changed = true
@@ -169,12 +169,12 @@ func (az *Cloud) reconcileTags(currentTagsOnResource, newTags map[string]*string
 
 	// if the systemTags is set, delete the old currentTagsOnResource
 	if len(systemTagsMap) > 0 {
-		klog.Infof("Tim, into systemtag set logic")
+		klog.Infof("Timb, into systemtag set logic")
 		for k := range currentTagsOnResource {
 			if _, ok := newTags[k]; !ok {
 				if found, _ := findKeyInMapCaseInsensitive(systemTagsMap, k); !found {
 					klog.V(2).Infof("reconcileTags: delete tag %s: %s", k, ptr.Deref(currentTagsOnResource[k], ""))
-					klog.Infof("Tim, delete tag %s: %s", k, ptr.Deref(currentTagsOnResource[k], ""))
+					klog.Infof("Timb, delete tag %s: %s", k, ptr.Deref(currentTagsOnResource[k], ""))
 					delete(currentTagsOnResource, k)
 					changed = true
 				}
