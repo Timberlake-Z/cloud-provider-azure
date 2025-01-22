@@ -3874,7 +3874,7 @@ func (az *Cloud) ensureLoadBalancerTagged(lb *armnetwork.LoadBalancer) bool {
 	if az.Tags == "" && len(az.TagsMap) == 0 {
 		return false
 	}
-	klog.Infof("Tim, start func ensureLoadBalancerTagged-----------")
+	klog.Infof("Tim, start func ensureLoadBalancerTagged")
 	klog.Infof("Tim, az.Tags: %s", az.Tags)
 	klog.Infof("Tim, az.TagsMap: %v", az.TagsMap)
 	tags := parseTags(az.Tags, az.TagsMap)
