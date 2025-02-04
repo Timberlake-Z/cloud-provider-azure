@@ -8850,3 +8850,78 @@ func fakeEnsureHostsInPool() func(context.Context, *v1.Service, []*v1.Node, stri
 		return nil
 	}
 }
+
+// write a test case for PrintStruct
+func TestPrintStruct(t *testing.T) {
+	type LoadBalancerSKUName string
+	type LoadBalancerSKU struct {
+		Name *LoadBalancerSKUName
+		Tier *string
+	}
+	type LoadBalancer struct {
+		ID        *string
+		Location  *string
+		SKU       *LoadBalancerSKU
+		Tags      map[string]*string
+		Name      *string
+		Tagsslice []string
+	}
+
+	lbName := "example-lb"
+	lbID := "lb-id"
+	lbLocation := "eastus"
+	skuName := LoadBalancerSKUName("Standard")
+	tier := "Regional"
+	tagValue := "production"
+	tags := map[string]*string{
+		"env": &tagValue,
+		"app": &tagValue,
+	}
+	tagsslice := []string{"env", "app"}
+
+	lb := &LoadBalancer{
+		ID:       &lbID,
+		Location: &lbLocation,
+		Name:     &lbName,
+		SKU: &LoadBalancerSKU{
+			Name: &skuName,
+			Tier: &tier,
+		},
+		Tags:      tags,
+		Tagsslice: tagsslice,
+	}
+
+	PrintStruct(lb)
+}
+
+func TestPrintStruct2(t *testing.T) {
+	type LoadBalancerSKUName string
+	type LoadBalancerSKU struct {
+		Name *LoadBalancerSKUName
+		Tier *string
+	}
+	type LoadBalancer struct {
+		ID        *string
+		Location  *string
+		SKU       *LoadBalancerSKU
+		Tags      map[string]*string
+		Name      *string
+		Tagsslice []string
+	}
+
+	// lbName := "example-lb"
+	// lbID := "lb-id"
+	// lbLocation := "eastus"
+	// skuName := LoadBalancerSKUName("Standard")
+	// tier := "Regional"
+	// tagValue := "production"
+	// tags := map[string]*string{
+	// 	"env": &tagValue,
+	// 	"app": &tagValue,
+	// }
+	// tagsslice := []string{"env", "app"}
+
+	lb := (*LoadBalancer)(nil)
+
+	PrintStruct(lb)
+}

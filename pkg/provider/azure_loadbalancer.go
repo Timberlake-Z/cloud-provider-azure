@@ -17,6 +17,7 @@ limitations under the License.
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1763,6 +1764,96 @@ func (az *Cloud) reconcileMultipleStandardLoadBalancerConfigurations(
 	return az.reconcileMultipleStandardLoadBalancerBackendNodes(ctx, clusterName, "", lbs, service, nodes, true)
 }
 
+func PrintStructFieldsToBuffer(prefix string, i interface{}, buf *bytes.Buffer) {
+	val := reflect.ValueOf(i)
+	typ := reflect.TypeOf(i)
+
+	if !val.IsValid() {
+		buf.WriteString(fmt.Sprintf("%s: <invalid>\n", prefix))
+		return
+	}
+
+	if val.Kind() == reflect.Ptr && val.IsNil() {
+		buf.WriteString(fmt.Sprintf("%s: nil\n", prefix))
+		return
+	}
+
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+		typ = typ.Elem()
+	}
+
+	switch val.Kind() {
+	case reflect.Struct:
+
+		for i := 0; i < val.NumField(); i++ {
+			field := typ.Field(i)
+			fieldValue := val.Field(i)
+			fieldPrefix := prefix + "." + field.Name
+
+			if !fieldValue.CanInterface() {
+				continue
+			}
+
+			// 对指针字段作 nil 检查
+			if fieldValue.Kind() == reflect.Ptr && fieldValue.IsNil() {
+				buf.WriteString(fmt.Sprintf("%s: nil\n", fieldPrefix))
+				continue
+			}
+
+			switch fieldValue.Kind() {
+			case reflect.Struct, reflect.Ptr, reflect.Map, reflect.Slice, reflect.Array:
+				PrintStructFieldsToBuffer(fieldPrefix, fieldValue.Interface(), buf)
+			default:
+				buf.WriteString(fmt.Sprintf("%s: %v\n", fieldPrefix, fieldValue.Interface()))
+			}
+		}
+	case reflect.Map:
+
+		keys := val.MapKeys()
+
+		if len(keys) > 0 && keys[0].Kind() == reflect.String {
+			var keyStrs []string
+			keyMap := map[string]reflect.Value{}
+			for _, k := range keys {
+				keyStr := k.String()
+				keyStrs = append(keyStrs, keyStr)
+				keyMap[keyStr] = k
+			}
+			sort.Strings(keyStrs)
+			for _, keyStr := range keyStrs {
+				k := keyMap[keyStr]
+				v := val.MapIndex(k)
+				itemPrefix := fmt.Sprintf("%s[%s]", prefix, keyStr)
+				PrintStructFieldsToBuffer(itemPrefix, v.Interface(), buf)
+			}
+		} else {
+
+			for _, k := range keys {
+				v := val.MapIndex(k)
+				itemPrefix := fmt.Sprintf("%s[%v]", prefix, k.Interface())
+				PrintStructFieldsToBuffer(itemPrefix, v.Interface(), buf)
+			}
+		}
+	case reflect.Slice, reflect.Array:
+
+		for i := 0; i < val.Len(); i++ {
+			item := val.Index(i)
+			itemPrefix := fmt.Sprintf("%s[%d]", prefix, i)
+			PrintStructFieldsToBuffer(itemPrefix, item.Interface(), buf)
+		}
+	default:
+
+		buf.WriteString(fmt.Sprintf("%s: %v\n", prefix, val.Interface()))
+	}
+}
+
+func PrintStruct(i interface{}) {
+	var buf bytes.Buffer
+	PrintStructFieldsToBuffer("LoadBalancer", i, &buf)
+	klog.Infof("\n%s", buf.String())
+}
+
 // reconcileLoadBalancer ensures load balancer exists and the frontend ip config is setup.
 // This also reconciles the Service's Ports with the LoadBalancer config.
 // This entails adding rules/probes for expected Ports and removing stale rules/ports.
@@ -1777,6 +1868,12 @@ func (az *Cloud) reconcileLoadBalancer(ctx context.Context, clusterName string, 
 		return nil, fmt.Errorf("reconcileLoadBalancer: failed to list managed LB: %w", err)
 	}
 
+	klog.Infof("timb:start reconcileLB: %s", serviceName)
+	klog.Infof("timb:wantLb: %t", wantLb)
+	// timb, print how many lb
+	klog.Infof("timb:existingLBs: %d", len(existingLBs))
+
+	// Removed unused function getString
 	// Delete backend pools for local service if:
 	// 1. the cluster is migrating from multi-slb to single-slb,
 	// 2. the service is changed from local to cluster.
@@ -1799,6 +1896,14 @@ func (az *Cloud) reconcileLoadBalancer(ctx context.Context, clusterName string, 
 		return nil, err
 	}
 	existingLBs = newLBs
+
+	// timb, write a function to print each field in struct LoadBalancer, including fields in nested struct
+	// timb, print the LoadBalancer struct, reference to models.go
+	klog.Infof("timb: print the lb we get from getServiceLoadBalancer")
+	PrintStruct(lb)
+
+	klog.Infof("timb: print the svc")
+	PrintStruct(service)
 
 	lbName := *lb.Name
 	lbResourceGroup := az.getLoadBalancerResourceGroup()
