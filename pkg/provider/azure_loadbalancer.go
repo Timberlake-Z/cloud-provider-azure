@@ -1851,7 +1851,7 @@ func PrintStructFieldsToBuffer(prefix string, i interface{}, buf *bytes.Buffer) 
 func PrintStruct(i interface{}) {
 	var buf bytes.Buffer
 	PrintStructFieldsToBuffer("LoadBalancer", i, &buf)
-	klog.Infof("\n%s", buf.String())
+	klog.Infof("timb:\n%s", buf.String())
 }
 
 // reconcileLoadBalancer ensures load balancer exists and the frontend ip config is setup.
@@ -2092,6 +2092,9 @@ func (az *Cloud) reconcileLoadBalancer(ctx context.Context, clusterName string, 
 	}
 
 	klog.V(2).Infof("reconcileLoadBalancer for service(%s): lb(%s) finished", serviceName, lbName)
+	klog.Infof("timb:end reconcileLB, show lb after reconcile")
+	PrintStruct(lb)
+	klog.Infof("timb:end reconcileLB: %s", serviceName)
 	return lb, nil
 }
 
