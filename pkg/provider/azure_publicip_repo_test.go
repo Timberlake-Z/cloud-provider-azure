@@ -338,3 +338,93 @@ func TestFindMatchedPIPByLoadBalancerIP(t *testing.T) {
 		})
 	}
 }
+
+func TestFindPIPByPublicIP(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	testPIP := &armnetwork.PublicIPAddress{
+		Name: ptr.To("testPIP"),
+		Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+			IPAddress: ptr.To("1.2.3.4"),
+		},
+	}
+
+	testCases := []struct {
+		desc             string
+		pipResourceGroup string
+		publicIP         string
+		initialPIPs      []*armnetwork.PublicIPAddress
+		refreshPIPs      []*armnetwork.PublicIPAddress
+		listErrorFirst   error
+		listErrorSecond  error
+		expectedPIP      *armnetwork.PublicIPAddress
+		expectedError    bool
+	}{
+		{
+			desc:             "FindPIPByPublicIP should return matching PIP from cache",
+			pipResourceGroup: "testRG",
+			publicIP:         "1.2.3.4",
+			initialPIPs:      []*armnetwork.PublicIPAddress{testPIP},
+			expectedPIP:      testPIP,
+		},
+		{
+			desc:             "FindPIPByPublicIP should return matching PIP after cache refresh",
+			pipResourceGroup: "testRG",
+			publicIP:         "1.2.3.4",
+			initialPIPs:      []*armnetwork.PublicIPAddress{},
+			refreshPIPs:      []*armnetwork.PublicIPAddress{testPIP},
+			expectedPIP:      testPIP,
+		},
+		{
+			desc:             "FindPIPByPublicIP should return error if no matching PIP found",
+			pipResourceGroup: "testRG",
+			publicIP:         "1.2.3.4",
+			initialPIPs:      []*armnetwork.PublicIPAddress{},
+			refreshPIPs:      []*armnetwork.PublicIPAddress{},
+			expectedError:    true,
+		},
+		{
+			desc:             "FindPIPByPublicIP should return error if listPIP fails on first call",
+			pipResourceGroup: "testRG",
+			publicIP:         "1.2.3.4",
+			listErrorFirst:   errors.New("first listPIP error"),
+			expectedError:    true,
+		},
+		{
+			desc:             "FindPIPByPublicIP should return error if listPIP fails on second call",
+			pipResourceGroup: "testRG",
+			publicIP:         "1.2.3.4",
+			refreshPIPs:      []*armnetwork.PublicIPAddress{},
+			listErrorSecond:  errors.New("second listPIP error"),
+			expectedError:    true,
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			az := GetTestCloud(ctrl)
+
+			// Mock listPIP method for initial cache read
+			mockPIPsClient := az.NetworkClientFactory.GetPublicIPAddressClient().(*mock_publicipaddressclient.MockInterface)
+			mockPIPsClient.EXPECT().List(gomock.Any(), test.pipResourceGroup).Return(test.initialPIPs, test.listErrorFirst).Times(1)
+
+			// Mock listPIP method for forced refresh, if needed
+			if test.listErrorFirst == nil && len(test.initialPIPs) == 0 {
+				mockPIPsClient.EXPECT().List(gomock.Any(), test.pipResourceGroup).
+					Return(test.refreshPIPs, test.listErrorSecond).
+					Times(1)
+			}
+			// Call the method under test
+			pip, err := az.FindPIPByPublicIP(context.TODO(), test.pipResourceGroup, test.publicIP)
+
+			// Assertions
+			if test.expectedError {
+				assert.Error(t, err, "expected an error but got none")
+			} else {
+				assert.NoError(t, err, "did not expect an error but got one")
+				assert.Equal(t, test.expectedPIP, pip, "unexpected PIP returned")
+			}
+		})
+	}
+}

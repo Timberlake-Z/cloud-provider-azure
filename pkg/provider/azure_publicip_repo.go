@@ -37,16 +37,53 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/util/deepcopy"
 )
 
+// get the pip resource by IP address
+func (az *Cloud) FindPIPByPublicIP(ctx context.Context, pipResourceGroup string, publicIP string) (*armnetwork.PublicIPAddress, error) {
+	pips, err := az.listPIP(ctx, pipResourceGroup, azcache.CacheReadTypeDefault)
+	klog.Infof("timb core, az.List result is %s", *pips[0].Name)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, pip := range pips {
+		if pip.Properties != nil && pip.Properties.IPAddress != nil &&
+			*pip.Properties.IPAddress == publicIP {
+			klog.Infof("found pip with address %s", publicIP)
+			return pip, nil
+		}
+	}
+
+	pips, err = az.listPIP(ctx, pipResourceGroup, azcache.CacheReadTypeForceRefresh)
+	if err != nil {
+		return nil, err
+	}
+	for _, pip := range pips {
+		if pip.Properties != nil && pip.Properties.IPAddress != nil &&
+			*pip.Properties.IPAddress == publicIP {
+			return pip, nil
+		}
+	}
+
+	return nil, fmt.Errorf("failed to find public IP with ip address %s in resource group %s", publicIP, pipResourceGroup)
+}
+
 // CreateOrUpdatePIP invokes az.NetworkClientFactory.GetPublicIPAddressClient().CreateOrUpdate with exponential backoff retry
 func (az *Cloud) CreateOrUpdatePIP(service *v1.Service, pipResourceGroup string, pip *armnetwork.PublicIPAddress) error {
 	ctx, cancel := getContextWithCancel()
 	defer cancel()
+	klog.Infof("timb core, createorupdate pip with name %s", ptr.Deref(pip.Name, ""))
+	klog.Infof("timb core, createorupdate pip with pip address %s", *pip.Properties.IPAddress)
+	klog.Infof("timb core, check the input of function below:")
+	klog.Infof("timb core, pipResourceGroup: %s", pipResourceGroup)
+	klog.Infof("timb core, pip.Name: %s", ptr.Deref(pip.Name, ""))
+	klog.Infof("timb core, pip.Properties.IPAddress: %s", *pip.Properties.IPAddress)
 
 	_, rerr := az.NetworkClientFactory.GetPublicIPAddressClient().CreateOrUpdate(ctx, pipResourceGroup, ptr.Deref(pip.Name, ""), *pip)
 	klog.V(10).Infof("NetworkClientFactory.GetPublicIPAddressClient().CreateOrUpdate(%s, %s): end", pipResourceGroup, ptr.Deref(pip.Name, ""))
 	if rerr == nil {
 		// Invalidate the cache right after updating
 		_ = az.pipCache.Delete(pipResourceGroup)
+		klog.Infof("timb core, finish creteorupdate, no error occured")
 		return nil
 	}
 

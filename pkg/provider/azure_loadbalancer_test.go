@@ -1903,7 +1903,7 @@ func TestGetServiceLoadBalancerMultiSLB(t *testing.T) {
 			}
 
 			lb, lbs, _, _, _, err := cloud.getServiceLoadBalancer(context.TODO(), &tc.service, testClusterName,
-				[]*v1.Node{}, true, tc.existingLBs)
+				[]*v1.Node{}, true, false, tc.existingLBs)
 			assert.Equal(t, tc.expectedError, err)
 			assert.Equal(t, tc.expectedLB, lb)
 			assert.Equal(t, tc.expectedLBs, lbs)
@@ -2044,7 +2044,7 @@ func TestGetServiceLoadBalancerCommon(t *testing.T) {
 			az.LoadBalancerSKU = test.SKU
 			service := test.service
 			lb, _, status, _, exists, err := az.getServiceLoadBalancer(context.TODO(), &service, testClusterName,
-				clusterResources.nodes, test.wantLB, []*armnetwork.LoadBalancer{})
+				clusterResources.nodes, test.wantLB, false, []*armnetwork.LoadBalancer{})
 			assert.Equal(t, test.expectedLB, lb)
 			if test.expectedStatus != nil {
 				assert.Equal(t, *test.expectedStatus, *status)
@@ -2056,6 +2056,504 @@ func TestGetServiceLoadBalancerCommon(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanBasicLBforMigration(t *testing.T) {
+	testCases := []struct {
+		desc                      string
+		existingLBs               []*armnetwork.LoadBalancer
+		service                   v1.Service
+		annotations               map[string]string
+		expectedExists            bool
+		expectedError             bool
+		existingLBsafterMigration []*armnetwork.LoadBalancer
+	}{
+		{
+			desc: "cleanBasicLBforMigration shall clean all basic Lbs exist in the cluster",
+			existingLBs: []*armnetwork.LoadBalancer{
+				{
+					Name:       ptr.To("testCluster"),
+					Properties: &armnetwork.LoadBalancerPropertiesFormat{},
+					SKU: &armnetwork.LoadBalancerSKU{
+						Name: to.Ptr(armnetwork.LoadBalancerSKUNameBasic),
+					},
+				},
+			},
+			service:                   getTestService("service1", v1.ProtocolTCP, nil, false, 80),
+			expectedExists:            false,
+			expectedError:             false,
+			existingLBsafterMigration: []*armnetwork.LoadBalancer{},
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			az := GetTestCloud(ctrl)
+			az.LoadBalancerSKU = "Standard"
+			clusterName := "testCluster"
+			service := test.service
+			_, expectedInterfaces, expectedVirtualMachines := getClusterResources(az, 3, 3)
+			setMockEnv(az, expectedInterfaces, expectedVirtualMachines, 1)
+
+			mockLBStore := make([]*armnetwork.LoadBalancer, len(test.existingLBs))
+			copy(mockLBStore, test.existingLBs)
+
+			mockLBsClient := az.NetworkClientFactory.GetLoadBalancerClient().(*mock_loadbalancerclient.MockInterface)
+			mockLBsClient.EXPECT().List(gomock.Any(), "rg").DoAndReturn(func(ctx context.Context, rg string) ([]*armnetwork.LoadBalancer, error) {
+				return mockLBStore, nil
+			}).AnyTimes()
+			mockLBsClient.EXPECT().Delete(gomock.Any(), "rg", gomock.Any()).DoAndReturn(func(ctx context.Context, rg string, lbName string) error {
+				for i, lb := range mockLBStore {
+					if *lb.Name == lbName {
+						mockLBStore = append(mockLBStore[:i], mockLBStore[i+1:]...)
+						break
+					}
+				}
+				return nil
+			}).AnyTimes()
+			mockLBsClient.EXPECT().CreateOrUpdate(gomock.Any(), "rg", gomock.Any(), gomock.Any()).Return(nil, nil).Times(len(test.existingLBs))
+			for _, existingLB := range test.existingLBs {
+				_, err := az.NetworkClientFactory.GetLoadBalancerClient().CreateOrUpdate(context.TODO(), "rg", *existingLB.Name, *existingLB)
+				assert.NoError(t, err)
+			}
+
+			if test.annotations != nil {
+				test.service.Annotations = test.annotations
+			}
+
+			existlb := test.existingLBs[0]
+			err := az.cleanBasicLBforMigtaion(context.TODO(), existlb, test.existingLBs, &service, clusterName)
+			assert.NoError(t, err)
+			existingLBs, err := mockLBsClient.List(context.Background(), "rg")
+			assert.NoError(t, err)
+			assert.Equal(t, test.existingLBsafterMigration, existingLBs)
+		})
+	}
+}
+
+func TestGetServiceLoadBalancerForMigration(t *testing.T) {
+	testCases := []struct {
+		desc                      string
+		existingLBs               []*armnetwork.LoadBalancer
+		service                   v1.Service
+		annotations               map[string]string
+		expectedLB                *armnetwork.LoadBalancer
+		expectedStatus            *v1.LoadBalancerStatus
+		expectedExists            bool
+		expectedError             bool
+		existingLBsafterMigration []*armnetwork.LoadBalancer
+	}{
+		{
+			desc: "getServiceLoadBalancer shall return a new standard lb object if all existing lbs are basic",
+			existingLBs: []*armnetwork.LoadBalancer{
+				{
+					Name:       ptr.To("testCluster"),
+					Properties: &armnetwork.LoadBalancerPropertiesFormat{},
+					SKU: &armnetwork.LoadBalancerSKU{
+						Name: to.Ptr(armnetwork.LoadBalancerSKUNameBasic),
+					},
+				},
+			},
+			service: getTestService("service1", v1.ProtocolTCP, nil, false, 80),
+			expectedLB: &armnetwork.LoadBalancer{
+				Name:     ptr.To("testCluster"),
+				Location: ptr.To("westus"),
+				SKU: &armnetwork.LoadBalancerSKU{
+					Name: to.Ptr(armnetwork.LoadBalancerSKUNameStandard),
+				},
+				Properties: &armnetwork.LoadBalancerPropertiesFormat{},
+			},
+			expectedExists:            false,
+			expectedError:             false,
+			existingLBsafterMigration: []*armnetwork.LoadBalancer{},
+		},
+		{
+			desc: "getServicesLoadBalancer shall return a new standard lb though there are existing one with wrong isinternal, and keep the old standard one",
+			existingLBs: []*armnetwork.LoadBalancer{
+				{
+					Name:       ptr.To("testCluster-internal"),
+					Properties: &armnetwork.LoadBalancerPropertiesFormat{},
+				},
+			},
+			service: getTestService("service1", v1.ProtocolTCP, nil, false, 80),
+			expectedLB: &armnetwork.LoadBalancer{
+				Name:     ptr.To("testCluster"),
+				Location: ptr.To("westus"),
+				SKU: &armnetwork.LoadBalancerSKU{
+					Name: to.Ptr(armnetwork.LoadBalancerSKUNameStandard),
+				},
+				Properties: &armnetwork.LoadBalancerPropertiesFormat{},
+			},
+			expectedExists: false,
+			expectedError:  false,
+			existingLBsafterMigration: []*armnetwork.LoadBalancer{
+				{
+					Name:       ptr.To("testCluster-internal"),
+					Properties: &armnetwork.LoadBalancerPropertiesFormat{},
+				},
+			},
+		},
+	}
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			az := GetTestCloud(ctrl)
+			clusterResources, expectedInterfaces, expectedVirtualMachines := getClusterResources(az, 3, 3)
+			setMockEnv(az, expectedInterfaces, expectedVirtualMachines, 1)
+			az.LoadBalancerSKU = "Standard"
+
+			// define cloud interaction
+			mockLBStore := make([]*armnetwork.LoadBalancer, len(test.existingLBs))
+			copy(mockLBStore, test.existingLBs)
+			mockLBsClient := az.NetworkClientFactory.GetLoadBalancerClient().(*mock_loadbalancerclient.MockInterface)
+			mockLBsClient.EXPECT().List(gomock.Any(), "rg").DoAndReturn(func(ctx context.Context, rg string) ([]*armnetwork.LoadBalancer, error) {
+				return mockLBStore, nil
+			}).AnyTimes()
+			mockLBsClient.EXPECT().Delete(gomock.Any(), "rg", gomock.Any()).DoAndReturn(func(ctx context.Context, rg string, lbName string) error {
+				for i, lb := range mockLBStore {
+					if *lb.Name == lbName {
+						mockLBStore = append(mockLBStore[:i], mockLBStore[i+1:]...)
+						break
+					}
+				}
+				return nil
+			}).AnyTimes()
+			mockLBsClient.EXPECT().CreateOrUpdate(gomock.Any(), "rg", gomock.Any(), gomock.Any()).Return(nil, nil).Times(len(test.existingLBs))
+
+			for _, existingLB := range test.existingLBs {
+				_, err := az.NetworkClientFactory.GetLoadBalancerClient().CreateOrUpdate(context.TODO(), "rg", *existingLB.Name, *existingLB)
+				assert.NoError(t, err)
+			}
+			if test.annotations != nil {
+				test.service.Annotations = test.annotations
+			}
+			service := test.service
+			lb, refreshedlbs, status, _, exists, err := az.getServiceLoadBalancer(context.TODO(), &service, testClusterName,
+				clusterResources.nodes, true, true, []*armnetwork.LoadBalancer{})
+			assert.Equal(t, test.expectedLB, lb)
+			if test.expectedStatus != nil {
+				assert.Equal(t, *test.expectedStatus, *status)
+			} else {
+				assert.Nil(t, status)
+			}
+			assert.Equal(t, test.expectedExists, exists)
+			assert.Equal(t, test.expectedError, err != nil)
+			// Check the existing LBs after migration
+			existingLBs, err := az.NetworkClientFactory.GetLoadBalancerClient().List(context.Background(), "rg")
+			assert.NoError(t, err)
+			assert.Equal(t, test.existingLBsafterMigration, refreshedlbs)
+			assert.Equal(t, test.existingLBsafterMigration, existingLBs)
+		})
+	}
+}
+
+func TestEnsurePublicIPExistsforMigration(t *testing.T) {
+	testCases := []struct {
+		desc          string
+		existingPIPs  []*armnetwork.PublicIPAddress
+		service       v1.Service
+		svcstatus     *v1.LoadBalancerStatus
+		expectedError bool
+		expectedpip   *armnetwork.PublicIPAddress
+		expectedlist  []*armnetwork.PublicIPAddress
+	}{
+		{
+			desc: "ensurePublicIPExistsforMigration shall change the sku of public ip if matched",
+			existingPIPs: []*armnetwork.PublicIPAddress{
+				{
+					Name: ptr.To("pip-basic"),
+					SKU: &armnetwork.PublicIPAddressSKU{
+						Name: to.Ptr(armnetwork.PublicIPAddressSKUNameBasic),
+					},
+					Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+						PublicIPAddressVersion: to.Ptr(armnetwork.IPVersionIPv4),
+						IPAddress:              ptr.To("1.2.3.4"),
+					},
+				},
+			},
+			service:   getTestService("service1", v1.ProtocolTCP, nil, false, 80),
+			svcstatus: &v1.LoadBalancerStatus{Ingress: []v1.LoadBalancerIngress{{IP: "1.2.3.4", Hostname: ""}}},
+			expectedpip: &armnetwork.PublicIPAddress{
+				Name: ptr.To("pip-basic"),
+				SKU: &armnetwork.PublicIPAddressSKU{
+					Name: to.Ptr(armnetwork.PublicIPAddressSKUNameStandard),
+				},
+				Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+					PublicIPAddressVersion: to.Ptr(armnetwork.IPVersionIPv4),
+					IPAddress:              ptr.To("1.2.3.4"),
+				},
+			},
+			expectedlist: []*armnetwork.PublicIPAddress{
+				{
+					Name: ptr.To("pip-basic"),
+					SKU: &armnetwork.PublicIPAddressSKU{
+						Name: to.Ptr(armnetwork.PublicIPAddressSKUNameStandard),
+					},
+					Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+						PublicIPAddressVersion: to.Ptr(armnetwork.IPVersionIPv4),
+						IPAddress:              ptr.To("1.2.3.4"),
+					},
+				},
+			},
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			az := GetTestCloud(ctrl)
+			_, expectedInterfaces, expectedVirtualMachines := getClusterResources(az, 3, 3)
+			mockPIPStore := make([]*armnetwork.PublicIPAddress, len(test.existingPIPs))
+			copy(mockPIPStore, test.existingPIPs)
+			setMockEnv(az, expectedInterfaces, expectedVirtualMachines, 1)
+			_ = az.pipCache.Delete("rg")
+			mockPIPClient := az.NetworkClientFactory.GetPublicIPAddressClient().(*mock_publicipaddressclient.MockInterface)
+
+			pipMap := &sync.Map{}
+			for _, pip := range test.existingPIPs {
+				pipMap.Store(strings.ToLower(ptr.Deref(pip.Name, "")), pip)
+			}
+			az.pipCache.Set("rg", pipMap)
+
+			mockPIPClient.EXPECT().Delete(gomock.Any(), "rg", gomock.Any()).DoAndReturn(func(ctx context.Context, rg string, pipName string) error {
+				for i, pip := range mockPIPStore {
+					if *pip.Name == pipName {
+						mockPIPStore = append(mockPIPStore[:i], mockPIPStore[i+1:]...)
+						break
+					}
+				}
+				return nil
+			}).AnyTimes()
+			// update operation should update the pip resource in mock store
+			mockPIPClient.EXPECT().CreateOrUpdate(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+				func(ctx context.Context, rg string, pipName string, pip armnetwork.PublicIPAddress) (*armnetwork.PublicIPAddress, error) {
+					found := false
+					for i, existingPIP := range mockPIPStore {
+						if *existingPIP.Name == pipName {
+							mockPIPStore[i] = &pip
+							found = true
+							break
+						}
+					}
+					if !found {
+						mockPIPStore = append(mockPIPStore, &pip)
+					}
+					return &pip, nil
+				}).AnyTimes()
+
+			mockPIPClient.EXPECT().Get(gomock.Any(), "rg", gomock.Any(), gomock.Nil()).DoAndReturn(
+				func(ctx context.Context, rg string, pipName string, expand *string) (*armnetwork.PublicIPAddress, error) {
+					for _, pip := range mockPIPStore {
+						if *pip.Name == pipName {
+							return pip, nil
+						}
+					}
+					return nil, nil
+				}).AnyTimes()
+
+			service := test.service
+			service.Status.LoadBalancer = *test.svcstatus
+			pip, err := az.ensurePublicIPExists(context.TODO(), &service, "occp", "occp", "testCluster", true, false, false, true)
+			assert.NoError(t, err)
+			assert.Equal(t, test.expectedpip, pip)
+			// Check the existing PIPs after migration
+			assert.NoError(t, err)
+			assert.Equal(t, test.expectedlist, mockPIPStore)
+		})
+	}
+}
+
+func TestReconcileFrontendPublicIPConfigsforMigration(t *testing.T) {
+	testCases := []struct {
+		desc         string
+		lb           *armnetwork.LoadBalancer
+		svcstatus    *v1.LoadBalancerStatus
+		service      v1.Service
+		status       *v1.LoadBalancerStatus
+		existingPIPs []*armnetwork.PublicIPAddress
+		expectedpip  *armnetwork.PublicIPAddress
+	}{
+		{
+			desc: "reconcileFrontendPublicIPConfigsforMigration shall config the loadbalancer with the updated frontend ip from service ingress",
+			lb: &armnetwork.LoadBalancer{
+				Name: ptr.To("testCluster"),
+				SKU: &armnetwork.LoadBalancerSKU{
+					Name: to.Ptr(armnetwork.LoadBalancerSKUNameStandard),
+				},
+			},
+			existingPIPs: []*armnetwork.PublicIPAddress{
+				{
+					Name: ptr.To("pip-basic"),
+					SKU: &armnetwork.PublicIPAddressSKU{
+						Name: to.Ptr(armnetwork.PublicIPAddressSKUNameBasic),
+					},
+					Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+						PublicIPAddressVersion: to.Ptr(armnetwork.IPVersionIPv4),
+						IPAddress:              ptr.To("1.2.3.4"),
+					},
+					ID: ptr.To("test-id"),
+				},
+			},
+			service:   getTestService("service1", v1.ProtocolTCP, nil, false, 80),
+			svcstatus: &v1.LoadBalancerStatus{Ingress: []v1.LoadBalancerIngress{{IP: "1.2.3.4", Hostname: ""}}},
+			expectedpip: &armnetwork.PublicIPAddress{
+				Name: ptr.To("pip-basic"),
+				SKU: &armnetwork.PublicIPAddressSKU{
+					Name: to.Ptr(armnetwork.PublicIPAddressSKUNameStandard),
+				},
+				Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+					PublicIPAddressVersion: to.Ptr(armnetwork.IPVersionIPv4),
+					IPAddress:              ptr.To("1.2.3.4"),
+				},
+			},
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			az := GetTestCloud(ctrl)
+			_, expectedInterfaces, expectedVirtualMachines := getClusterResources(az, 3, 3)
+			mockPIPStore := make([]*armnetwork.PublicIPAddress, len(test.existingPIPs))
+			copy(mockPIPStore, test.existingPIPs)
+			setMockEnv(az, expectedInterfaces, expectedVirtualMachines, 1)
+			_ = az.pipCache.Delete("rg")
+			mockPIPClient := az.NetworkClientFactory.GetPublicIPAddressClient().(*mock_publicipaddressclient.MockInterface)
+
+			pipMap := &sync.Map{}
+			for _, pip := range test.existingPIPs {
+				pipMap.Store(strings.ToLower(ptr.Deref(pip.Name, "")), pip)
+			}
+			az.pipCache.Set("rg", pipMap)
+
+			mockPIPClient.EXPECT().Delete(gomock.Any(), "rg", gomock.Any()).DoAndReturn(func(ctx context.Context, rg string, pipName string) error {
+				for i, pip := range mockPIPStore {
+					if *pip.Name == pipName {
+						mockPIPStore = append(mockPIPStore[:i], mockPIPStore[i+1:]...)
+						break
+					}
+				}
+				return nil
+			}).AnyTimes()
+			// update operation should update the pip resource in mock store
+			mockPIPClient.EXPECT().CreateOrUpdate(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+				func(ctx context.Context, rg string, pipName string, pip armnetwork.PublicIPAddress) (*armnetwork.PublicIPAddress, error) {
+					found := false
+					for i, existingPIP := range mockPIPStore {
+						if *existingPIP.Name == pipName {
+							mockPIPStore[i] = &pip
+							found = true
+							break
+						}
+					}
+					if !found {
+						mockPIPStore = append(mockPIPStore, &pip)
+					}
+					return &pip, nil
+				}).AnyTimes()
+
+			mockPIPClient.EXPECT().Get(gomock.Any(), "rg", gomock.Any(), gomock.Nil()).DoAndReturn(
+				func(ctx context.Context, rg string, pipName string, expand *string) (*armnetwork.PublicIPAddress, error) {
+					for _, pip := range mockPIPStore {
+						if *pip.Name == pipName {
+							return pip, nil
+						}
+					}
+					return nil, nil
+				}).AnyTimes()
+
+			service := test.service
+			service.Status.LoadBalancer = *test.svcstatus
+			lb := test.lb
+			lb.Properties = &armnetwork.LoadBalancerPropertiesFormat{}
+			isDualStack := isServiceDualStack(&service)
+			defaultLBFrontendIPConfigName := az.getDefaultFrontendIPConfigName(&service)
+			// subnetClient.EXPECT().Get(gomock.Any(), "rg", "vnet", "subnet").Return(
+			// 	&armnetwork.Subnet{ID: ptr.To("subnet0"), Properties: &armnetwork.SubnetPropertiesFormat{AddressPrefixes: to.SliceOfPtrs("1.2.3.4/31", "2001::1/127")}}, nil).MaxTimes(1)
+			lbFrontendIPConfigNames := map[bool]string{
+				consts.IPVersionIPv4: getResourceByIPFamily(defaultLBFrontendIPConfigName, isDualStack, consts.IPVersionIPv4),
+				consts.IPVersionIPv6: getResourceByIPFamily(defaultLBFrontendIPConfigName, isDualStack, consts.IPVersionIPv6),
+			}
+			_, _, dirty, err := az.reconcileFrontendIPConfigs(context.TODO(), "testCluster", &service, lb, test.status, true, true, lbFrontendIPConfigNames)
+			assert.NoError(t, err)
+			assert.Equal(t, true, dirty)
+			assert.Equal(t, 1, len(lb.Properties.FrontendIPConfigurations))
+			assert.Equal(t, "test-id", *lb.Properties.FrontendIPConfigurations[0].Properties.PublicIPAddress.ID)
+		})
+	}
+}
+
+func TestReconcileFrontendIPConfigsforMigration(t *testing.T) {
+	testCases := []struct {
+		desc      string
+		lb        *armnetwork.LoadBalancer
+		svcstatus *v1.LoadBalancerStatus
+		service   v1.Service
+		status    *v1.LoadBalancerStatus
+	}{
+		{
+			desc: "reconcileFrontendIPConfigsforMigration shall config the loadbalancer with the new frontend ip from service ingress",
+			lb: &armnetwork.LoadBalancer{
+				Name: ptr.To("testCluster"),
+				SKU: &armnetwork.LoadBalancerSKU{
+					Name: to.Ptr(armnetwork.LoadBalancerSKUNameStandard),
+				},
+			},
+			service: getTestServiceWithAnnotation("test", map[string]string{
+				consts.ServiceAnnotationLoadBalancerInternalSubnet: "subnet",
+				consts.ServiceAnnotationLoadBalancerInternal:       consts.TrueAnnotationValue,
+			}, true, 80),
+			svcstatus: &v1.LoadBalancerStatus{Ingress: []v1.LoadBalancerIngress{{IP: "1.2.3.4"}}},
+		},
+	}
+	// 	{
+	// 		desc: "reconcileFrontendIPConfigsforMigration shall config the loadbalancer with the new frontend ip from service ingress",
+	// 		lb: &armnetwork.LoadBalancer{
+	// 			Name: ptr.To("testCluster"),
+	// 			SKU: &armnetwork.LoadBalancerSKU{
+	// 				Name: to.Ptr(armnetwork.LoadBalancerSKUNameStandard),
+	// 			},
+	// 		},
+	// 		service: getTestServiceWithAnnotation("test", map[string]string{
+	// 			consts.ServiceAnnotationLoadBalancerInternalSubnet: "subnet",
+	// 			consts.ServiceAnnotationLoadBalancerInternal:       consts.TrueAnnotationValue,
+	// 		}, true, 80),
+	// 		svcstatus: &v1.LoadBalancerStatus{Ingress: []v1.LoadBalancerIngress{{IP: "1.2.3.4"}}},
+	// 	},
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			az := GetTestCloud(ctrl)
+			lb := test.lb
+			lb.Properties = &armnetwork.LoadBalancerPropertiesFormat{}
+			service := test.service
+			service.Status.LoadBalancer = *test.svcstatus
+			subnetClient := az.subnetRepo.(*subnet.MockRepository)
+			isDualStack := isServiceDualStack(&service)
+			defaultLBFrontendIPConfigName := az.getDefaultFrontendIPConfigName(&service)
+			subnetClient.EXPECT().Get(gomock.Any(), "rg", "vnet", "subnet").Return(
+				&armnetwork.Subnet{ID: ptr.To("subnet0"), Properties: &armnetwork.SubnetPropertiesFormat{AddressPrefixes: to.SliceOfPtrs("1.2.3.4/31", "2001::1/127")}}, nil).MaxTimes(1)
+			lbFrontendIPConfigNames := map[bool]string{
+				consts.IPVersionIPv4: getResourceByIPFamily(defaultLBFrontendIPConfigName, isDualStack, consts.IPVersionIPv4),
+				consts.IPVersionIPv6: getResourceByIPFamily(defaultLBFrontendIPConfigName, isDualStack, consts.IPVersionIPv6),
+			}
+			_, _, dirty, err := az.reconcileFrontendIPConfigs(context.TODO(), "testCluster", &service, lb, test.status, true, true, lbFrontendIPConfigNames)
+			assert.NoError(t, err)
+			assert.Equal(t, true, dirty)
+			assert.Equal(t, 1, len(lb.Properties.FrontendIPConfigurations))
+			assert.Equal(t, "1.2.3.4", *lb.Properties.FrontendIPConfigurations[0].Properties.PrivateIPAddress)
+		})
+	}
+}
+
+// func
 
 func TestGetServiceLoadBalancerWithExtendedLocation(t *testing.T) {
 	service := getTestService("service1", v1.ProtocolTCP, nil, false, 80)
@@ -2080,7 +2578,7 @@ func TestGetServiceLoadBalancerWithExtendedLocation(t *testing.T) {
 	mockLBsClient.EXPECT().List(gomock.Any(), "rg").Return(nil, nil)
 
 	lb, _, status, _, exists, err := az.getServiceLoadBalancer(context.TODO(), &service, testClusterName,
-		clusterResources.nodes, false, []*armnetwork.LoadBalancer{})
+		clusterResources.nodes, false, false, []*armnetwork.LoadBalancer{})
 	assert.Equal(t, expectedLB, lb, "GetServiceLoadBalancer shall return a default LB with expected location.")
 	assert.Nil(t, status, "GetServiceLoadBalancer: Status should be nil for default LB.")
 	assert.Equal(t, false, exists, "GetServiceLoadBalancer: Default LB should not exist.")
@@ -2103,7 +2601,7 @@ func TestGetServiceLoadBalancerWithExtendedLocation(t *testing.T) {
 	mockLBsClient.EXPECT().List(gomock.Any(), "rg").Return(nil, nil)
 
 	lb, _, status, _, exists, err = az.getServiceLoadBalancer(context.TODO(), &service, testClusterName,
-		clusterResources.nodes, true, []*armnetwork.LoadBalancer{})
+		clusterResources.nodes, true, false, []*armnetwork.LoadBalancer{})
 	assert.Equal(t, *expectedLB, *lb, "GetServiceLoadBalancer shall return a new LB with expected location.")
 	assert.Nil(t, status, "GetServiceLoadBalancer: Status should be nil for new LB.")
 	assert.Equal(t, false, exists, "GetServiceLoadBalancer: LB should not exist before hand.")
@@ -4001,7 +4499,7 @@ func TestReconcileLoadBalancerCommon(t *testing.T) {
 			}).AnyTimes()
 			mockLBBackendPool.EXPECT().EnsureHostsInPool(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
-			lb, rerr := az.reconcileLoadBalancer(context.TODO(), "testCluster", &service, clusterResources.nodes, test.wantLb)
+			lb, rerr := az.reconcileLoadBalancer(context.TODO(), "testCluster", &service, clusterResources.nodes, test.wantLb, false)
 			if test.expectedError != nil {
 				assert.EqualError(t, rerr, test.expectedError.Error())
 			} else {
@@ -5286,7 +5784,7 @@ func TestEnsurePublicIPExistsCommon(t *testing.T) {
 				return []*armnetwork.PublicIPAddress{basicPIP}, nil
 			}).AnyTimes()
 
-			pip, err := az.ensurePublicIPExists(context.TODO(), &service, test.pipName, test.inputDNSLabel, "", false, test.foundDNSLabelAnnotation, test.isIPv6)
+			pip, err := az.ensurePublicIPExists(context.TODO(), &service, test.pipName, test.inputDNSLabel, "", false, test.foundDNSLabelAnnotation, test.isIPv6, false)
 			assert.Equal(t, test.expectedError, err != nil, "unexpectedly encountered (or not) error: %v", err)
 			if test.expectedID != "" {
 				assert.Equal(t, test.expectedID, ptr.Deref(pip.ID, ""))
@@ -5375,7 +5873,7 @@ func TestEnsurePublicIPExistsWithExtendedLocation(t *testing.T) {
 					assert.Nil(t, publicIPAddressParameters.Zones)
 					return nil, nil
 				}).Times(1)
-			pip, err := az.ensurePublicIPExists(context.TODO(), &service, tc.pipName, "", "", false, false, tc.isIPv6)
+			pip, err := az.ensurePublicIPExists(context.TODO(), &service, tc.pipName, "", "", false, false, tc.isIPv6, false)
 			assert.NotNil(t, pip, "ensurePublicIPExists shall create a new pip"+
 				"with extendedLocation if there is no existing pip")
 			assert.Nil(t, err, "ensurePublicIPExists should create a new pip without errors.")
@@ -6411,7 +6909,7 @@ func TestReconcileZonesForFrontendIPConfigs(t *testing.T) {
 				consts.IPVersionIPv4: getResourceByIPFamily(defaultLBFrontendIPConfigName, isDualStack, consts.IPVersionIPv4),
 				consts.IPVersionIPv6: getResourceByIPFamily(defaultLBFrontendIPConfigName, isDualStack, consts.IPVersionIPv6),
 			}
-			_, _, dirty, err := cloud.reconcileFrontendIPConfigs(context.TODO(), "testCluster", &service, lb, tc.status, true, lbFrontendIPConfigNames)
+			_, _, dirty, err := cloud.reconcileFrontendIPConfigs(context.TODO(), "testCluster", &service, lb, tc.status, true, false, lbFrontendIPConfigNames)
 			if tc.expectedErr == nil {
 				assert.NoError(t, err)
 			} else {
@@ -6701,7 +7199,7 @@ func TestReconcileFrontendIPConfigs(t *testing.T) {
 				false: getResourceByIPFamily(defaultLBFrontendIPConfigName, isDualStack, false),
 				true:  getResourceByIPFamily(defaultLBFrontendIPConfigName, isDualStack, true),
 			}
-			_, _, dirty, err := cloud.reconcileFrontendIPConfigs(context.TODO(), "testCluster", &service, lb, tc.status, tc.wantLB, lbFrontendIPConfigNames)
+			_, _, dirty, err := cloud.reconcileFrontendIPConfigs(context.TODO(), "testCluster", &service, lb, tc.status, tc.wantLB, false, lbFrontendIPConfigNames)
 			if tc.expectedErr != nil {
 				assert.Equal(t, tc.expectedErr, err)
 			} else {

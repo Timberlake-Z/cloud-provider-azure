@@ -150,6 +150,7 @@ type Cloud struct {
 	// multipleStandardLoadBalancerConfigurationsSynced make sure the `reconcileMultipleStandardLoadBalancerConfigurations`
 	// runs only once every time the cloud provide restarts.
 	multipleStandardLoadBalancerConfigurationsSynced bool
+	lbskumigrationprocessed                          bool
 	// nodesWithCorrectLoadBalancerByPrimaryVMSet marks nodes that are matched with load balancers by primary vmSet.
 	nodesWithCorrectLoadBalancerByPrimaryVMSet      sync.Map
 	multipleStandardLoadBalancersActiveServicesLock sync.Mutex
