@@ -141,7 +141,7 @@ func (az *Cloud) reconcileService(ctx context.Context, clusterName string, servi
 	// get the config of SKU
 	klog.Infof("timb core: start reconcile Service, azindicator: %s", az.Config.LoadBalancerSKU)
 	wantstandardLb := false
-	if az.Config.LoadBalancerSKU == consts.LoadBalancerSKUStandard {
+	if strings.EqualFold(az.Config.LoadBalancerSKU, consts.LoadBalancerSKUStandard) {
 		if !az.lbskumigrationprocessed {
 			wantstandardLb = true
 		}
@@ -888,6 +888,10 @@ func (az *Cloud) getServiceLoadBalancer(
 		klog.Infof("the number of existing LBs: %d", len(existingLBs))
 		klog.Infof("timb core: get into delete basic Lbs logic")
 		for _, lb := range existingLBs {
+			klog.Infof("timb core: check existing lb list logic")
+			if lb.SKU != nil && lb.SKU.Name != nil {
+				klog.Infof("timb core: SKU name is not nil, and the name is %s", *lb.SKU.Name)
+			}
 			if lb.SKU != nil && lb.SKU.Name != nil && strings.EqualFold(string(*lb.SKU.Name), string(armnetwork.LoadBalancerSKUNameBasic)) {
 				klog.Infof("start delete one basic LB")
 				err := az.cleanBasicLBforMigtaion(ctx, lb, existingLBs, service, clusterName)
@@ -1270,7 +1274,12 @@ func (az *Cloud) ensurePublicIPExists(ctx context.Context, service *v1.Service, 
 			if (isIPv6 && ip.To4() == nil) || (!isIPv6 && ip.To4() != nil) {
 				pip, err := az.FindPIPByPublicIP(ctx, pipResourceGroup, serviceIP.IP)
 				if err != nil {
-					return nil, err
+					// in this case, the service can not find the relative pip resouce, options are:
+					// 1. build a new pip resource, but cannot ensure use the same public ip address
+					// 2. return an error, and eliminate the upgrade.
+					// here we take the option 1 because the only reason for the failure is the pip resource are deleted accidently, can not get anyway.
+					klog.Warningf("can not find the pip resource by public ip address: %s, will build a new Public IP resource", serviceIP.IP)
+					break
 				}
 				klog.Infof("timb core, find the matching pip resource, name: %s", *pip.Name)
 
@@ -1293,7 +1302,6 @@ func (az *Cloud) ensurePublicIPExists(ctx context.Context, service *v1.Service, 
 			}
 		}
 	}
-	klog.Infof("timb core: error! not end yet")
 
 	pip, existsPip, err := az.getPublicIPAddress(ctx, pipResourceGroup, pipName, azcache.CacheReadTypeDefault)
 	if err != nil {
@@ -2649,7 +2657,7 @@ func (az *Cloud) reconcileFrontendIPConfigs(
 	serviceName := getServiceName(service)
 	isInternal := requiresInternalLoadBalancer(service)
 	klog.Infof("timb core, isinternal? %t", isInternal)
-	klog.Infof("\n\n\ntimb core, print lbFrontendIPConfigIDs: %v\n\n\n", lbFrontendIPConfigNames)
+	// klog.Infof("\n\n\ntimb core, print lbFrontendIPConfigIDs: %v\n\n\n", lbFrontendIPConfigNames)
 	dirtyConfigs := false
 	var newConfigs []*armnetwork.FrontendIPConfiguration
 	var toDeleteConfigs []*armnetwork.FrontendIPConfiguration
@@ -2660,8 +2668,11 @@ func (az *Cloud) reconcileFrontendIPConfigs(
 	klog.Infof("timb core, get into function")
 	klog.Infof("timb core, service status ingress len: %d", len(service.Status.LoadBalancer.Ingress))
 	// before we start, need to confirm if the ingress info is configured in service object
-	if wantstandardLb && wantLb {
+	// wantstandardLb := false
+	wantstandardLb = false
+	if wantLb {
 		if len(service.Status.LoadBalancer.Ingress) > 0 {
+			wantstandardLb = true
 			klog.Infof("timb core: service do have status configured, and ingress is not empty")
 			for _, ingress := range service.Status.LoadBalancer.Ingress {
 				if ingress.IP != "" {
@@ -2672,8 +2683,10 @@ func (az *Cloud) reconcileFrontendIPConfigs(
 			klog.Infof("timb core: service ingress is empty, cant proceed")
 			return nil, toDeleteConfigs, false, nil
 		}
-	}
 
+	}
+	klog.Infof("timb core, !!! for reconcileFrontendIPConfig: wantstandardLb? %t", wantstandardLb)
+	// klog.Infof("\n\n\ntimb core, print lbFrontendIPConfigIDs: %v\n\n\n", lbFrontendIPConfigNames)
 	// for migration
 	// for first service reconciled, the stardard is a new built object, not an Az resource yet, no config in it
 	// newConfigs is empty here
